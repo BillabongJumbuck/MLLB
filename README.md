@@ -27,7 +27,7 @@ Training: `training/keras_lb.py`
 ---
 MLLB复现记录
 
-### 一. 基本运行环境
+### 一. 运行环境
 ```text
 CPU: 13th Gen Intel i5-1335U (12) @ 4.600GHz
 OS: Ubuntu 24.04.3 LTS x86_64
@@ -55,4 +55,164 @@ sudo reboot
 qemu-img create -f qcow2 ubuntu1804.qcow2 50G   
 ```
 大小不能少于50G,否则无法提供足够空间编译作者提供的修改内核.
-3. 
+3. 在虚拟磁盘安装操作系统 [create.fish](./scripts/qemu/create.fish)
+
+```shell
+#!/usr/bin/fish
+
+qemu-system-x86_64 \
+    -enable-kvm \
+    -name "Ubuntu 1804 Server VM" \
+    -m 8192 \
+    -cpu host \
+    -smp cores=4,threads=1,sockets=1 \
+    -vga virtio \
+    -display gtk \
+    -nic user,model=virtio-net-pci \
+    -hda ubuntu1804.qcow2 \
+    -cdrom ./ubuntu-18.04.6-live-server-amd64.iso \
+    -boot d
+```
+
+4. 配置qemu虚拟机网络和硬件选项 [start.fish](./scripts/qemu/start.fish)
+
+   ```shell
+   #!/usr/bin/fish
+   
+   set VM_DISK "./ubuntu1804.qcow2"
+   
+   # 虚拟机硬件配置
+   set MEMORY_TOTAL "8G"
+   set MEMORY_NODE0 "4G"
+   set MEMORY_NODE1 "4G"
+   set VCPUS 56
+   set CORES 14
+   set THREADS 2
+   set SOCKETS 2
+   
+   # 将虚拟机22号端口转发至宿主机10023号端口,从而可以使用SSH登陆虚拟机操作系统
+   
+   # 启动命令
+   qemu-system-x86_64 \
+       -enable-kvm \
+       -cpu host,hv_relaxed,hv_time,hv_vapic,hv_spinlocks=0x1fff \
+       -m $MEMORY_TOTAL \
+       -smp $VCPUS,cores=$CORES,threads=$THREADS,sockets=$SOCKETS \
+       -hda $VM_DISK \
+       -name "Ubuntu 1804 Server VM" \
+       -netdev user,id=net0,hostfwd=tcp::10023-:22 \
+       -device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+       -object memory-backend-ram,size=$MEMORY_NODE0,id=mem1 \
+       -object memory-backend-ram,size=$MEMORY_NODE1,id=mem2 \
+       -numa node,nodeid=0,cpus=0-27,memdev=mem1 \
+       -numa node,nodeid=1,cpus=28-55,memdev=mem2
+   ```
+
+### 四. 配置虚拟机代码运行环境
+
+**以下所有操作在虚拟机进行**
+
+0. 安装pip
+
+```shell
+sudo apt install python3-pip
+```
+
+1. 安装BCC
+
+   搜集数据的代码使用BCC工具。最低版本要求为v0.10.0. 低于此版本将无法运行作者提供的搜集数据代码.
+   
+   **通过apt install从软件仓库安装的bcc版本为v0.5.0,无法运行作者的代码!**
+   
+   **因此, 改用从源代码编译的方式安装.**
+
+```shell
+# 安装编译工具
+sudo apt install -y \
+  zip bison build-essential cmake flex git libedit-dev \
+  llvm-6.0 llvm-6.0-dev libclang-6.0-dev python3-setuptools \
+  zlib1g-dev libelf-dev liblzma-dev arping netperf iperf
+  
+# clone源代码
+git clone https://github.com/iovisor/bcc.git
+cd bcc
+git checkout v0.10.0  # 切换为0.10.0版本
+mkdir build 
+cd build
+cmake ..      # 可能会提示需要更高版本的cmake,参见 #升级cmake
+make
+
+# build python3 binding
+cmake -DPYTHON_CMD=python3 .. 
+pushd src/python/
+make
+sudo make install
+popd
+
+# 安装python3软件包
+cd src/python/bcc-python3
+sudo -H pip3 install .
+pip3 list | grep bcc  # 验证bcc安装版本
+
+# 加载libbcc动态链接库
+# 回到bcc/build目录
+cd src/cc
+sudo make install
+sudo ldconfig
+ldconfig -p | grep libbcc  # 验证安装
+```
+
+> ##### 	升级cmake (直接下载 CMake 二进制包)
+> 
+> ```shell
+> cd /tmp
+> wget https://github.com/Kitware/CMake/releases/download/v3.27.0/cmake-3.27.0-linux-x86_64.tar.gz
+> tar xf cmake-3.27.0-linux-x86_64.tar.gz
+> sudo mv cmake-3.27.0-linux-x86_64 /opt/cmake
+> sudo ln -sf /opt/cmake/bin/* /usr/local/bin/
+> cmake --version # 验证版本
+> ```
+
+2. 安装tensorflow
+
+   ubuntu 18.04 server自带的python版本为3.6.9. 针对该版本进行tensorflow的安装.
+
+```shell 
+pip3 install tensorflow==1.14.0
+```
+
+>  可能出现的问题: tensorflow依赖protobuf, 最新的protobuf已放弃对python3.6.9的支持.
+>
+>  ```shell
+>  protobuf requires Python '>=3.7' but the running Python is 3.6.9
+>  ```
+>
+>  解决方法
+>
+>  ```shell
+>  pip3 install protobuf==3.18.0  # 手动安装低版本protobuf
+>  pip3 install tensorflow==1.14.0 --no-deps # 禁用自动安装依赖
+>  # 手动安装其他依赖
+>  pip3 install numpy absl-py wrapt gast astor termcolor keras_applications keras_preprocessing
+>  ```
+
+### 五. 搜集数据
+
+1. 克隆作者仓库
+
+```shell
+git clone https://github.com/Keitokuch/MLLB.git
+```
+
+2. 安装工作负载模拟工具
+
+```shell
+sudo apt install stress-ng
+```
+
+3. 运行数据收集脚本
+
+```shell
+pip3 install pandas
+sudo ./dump_lb.py -t tag --old -o raw_tag1.csv
+```

@@ -305,7 +305,7 @@ python3 dump_weights.py model_0001
 
   - 等于y时表示启用硬件数据采集
 
-推荐编译选项配置:
+​	推荐编译选项配置:
 
 ```shell
 #
@@ -319,7 +319,124 @@ CONFIG_JC_SCHED_FXDPT=y
 CONFIG_JC_SCHED_PERF=y
 ```
 
-完整的.config文件可参考[scripts/.config](scripts/.config)
+​	完整的.config文件可参考[scripts/.config](scripts/.config)
+
+​	接下来编译和安装作者的修改内核.
+
+1. 克隆源代码
+
+```shell
+git clone https://github.com/Keitokuch/linux-4.15-lb.git
+```
+2. 配置编译选项
+```shell
+# 将.config文件拷贝到该目录下或使用以下命令自定义编译选项
+# 把当前运行的内核配置拷贝到源代码目录
+cp -v /boot/config-$(uname -r) .config  # 使用bash 或
+cp -v /boot/config-(uname -r) .config  # 使用fish
+# 基于旧的配置（.config），用新内核版本的默认值来填充所有新增的配置选项
+make olddefconfig
+# 自定义配置
+make menuconfig
+```
+3. 编译
+``` shell
+make -j$(nproc)  # 使用bash 或
+make -j(nproc)  # 使用fish
+```
+
+>  第一次编译持续时间较长. 在我的机器上大约共花费1个小时. 具体依机器性能而定.
+>
+> 编译过程需要大量的磁盘空间, 若系统`/`分区分配的磁盘空间过小(一般来说, 小于25G), 会因磁盘空间不足而中断编译. 需要为`/`分区分配更多磁盘空间, 在重新运行`make -j(nproc)`继续编译.
+>
+> 注意, 即使qemu-img创建的磁盘大于25G, 仍可能产生磁盘空间不足问题, 因为文件系统可能没有完全使用磁盘空间.可以通过下面的命令为文件系统分配更多的空间.
+>
+> ```shell
+> sudo lvextend -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv
+> sudo resize2fs /dev/mapper/ubuntu--vg-ubuntu--lv
+> ```
+>
+> 
+
+4. 安装
+
+```shell
+sudo make modules_install  # 安装编译好的内核模块（如驱动程序）到 /lib/modules/ 目录
+sudo make install # 安装内核镜像（vmlinuz-*）和更新启动加载器配置（例如GRUB）
+```
+
+5. 启动新内核
+
+   i. 重启
+
+   ii. 在启动界面,进入GRUB菜单, 选择"Advanced options for Ubunutu",
+
+   iii. 选择新内核版本启动, 名称后缀为4.15.0+
+
+   iv. 成功启动后, 可通过``uname -r`验证是否启动了新版本
 
 
+
+### 八. 测试
+
+**测试部分仅针对开启了CONFIG_JC_SCHED_TEST编译选项的定制内核**
+
+1. 开启测试
+
+   ​	作者定义了一个名为 jc_sched 的系统调用，接受一个整型参数 start. 当start非零时, 系统在每次触发负载均衡决策时, 会将CFS和ML的决策结果同时打印到日志中, 从而对比ML决策的准确率.当start为0时, 停止打印日志.
+
+   ​	由于作者未提供调用该系统调用的代码, 因此使用[如下](scripts/syscall/enable_jc_sched.c)C语言程序开启/关闭日志打印.
+
+   ```C
+   #include <stdio.h>
+   #include <unistd.h>
+   #include <stdlib.h>
+   #include <sys/syscall.h>
+   
+   // 根据内核代码，系统调用号是 345
+   #define __NR_jc_sched 345 
+   
+   int main(int argc, char *argv[]) {
+       long ret;
+       int start = 0;
+   
+       if (argc < 2) {
+           printf("用法: %s <0 或 1>\n", argv[0]);
+           printf("参数 1 开启 ML 调度和日志；参数 0 关闭。\n");
+           return 1;
+       }
+       
+       start = atoi(argv[1]);
+   
+       // 调用系统调用
+       ret = syscall(__NR_jc_sched, start); 
+   
+       if (ret == 0) {
+           printf("ML Sched (jc_sched) %s 成功。\n", start ? "开启" : "关闭");
+       } else {
+           perror("syscall jc_sched 失败");
+       }
+   
+       return 0;
+   }
+   
+   ```
+
+   编译和使用:
+
+   ```shell
+   gcc -o jc_sched_ctl enable_jc_sched.c # 编译C程序
+   
+   sudo ./jc_sched_ctl 1  # 开启日志打印
+   sudo ./jc_sched_ctl 0  # 关闭日志打印
+   ```
+
+2.  运行stress-ng 负载模拟程序
+
+3. 在MLLB/eval文件夹下, 运行测试结果统计脚本
+
+   ```shell
+   python3 eval_acc.py  # 测试准确率
+   python3 eval_time.py  # 测试时间耗费
+   ```
 
